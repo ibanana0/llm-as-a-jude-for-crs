@@ -10,7 +10,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 from environments import MusicCatalog
-from generate_response import JUDGE_SESSION_IDS, build_dialogue_context
+from generate_response import JUDGE_SESSION_IDS, DEFAULT_SESSION_FILE, build_dialogue_context
 from llm_call.gemini import Gemini_LLM_Client
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,6 +42,27 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Maximum API/JSON attempts for each response (default: 3).",
+    )
+    parser.add_argument(
+        "--session_ids_path",
+        default=str(DEFAULT_SESSION_FILE),
+        help=f"Path to JSON file containing filtered session IDs (default: {DEFAULT_SESSION_FILE}).",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        default="talkpl-ai/TalkPlayData-Challenge-Blind-A",
+        help="Hugging Face dataset identifier.",
+    )
+    parser.add_argument(
+        "--split",
+        default="test",
+        help="Dataset split name.",
+    )
+    parser.add_argument(
+        "--target_models",
+        nargs="+",
+        default=None,
+        help="Specific target models to evaluate. If omitted, evaluates all TARGET_MODELS.",
     )
     args = parser.parse_args()
     if args.max_retries < 1:
@@ -113,17 +134,31 @@ def main() -> None:
         ],
     )
     source_dataset = load_dataset(
-        "talkpl-ai/TalkPlayData-Challenge-Blind-A-Master",
-        split="test",
+        args.dataset_name,
+        split=args.split,
     )
     source_by_session = {item["session_id"]: item for item in source_dataset}
     judge_model_tag = args.judge_model.replace("/", "-")
 
-    for session_id in tqdm(sorted(JUDGE_SESSION_IDS), desc="Sessions"):
+    session_ids_file = Path(args.session_ids_path)
+    if session_ids_file.is_file():
+        with session_ids_file.open("r", encoding="utf-8") as f:
+            session_ids = json.load(f)
+        print(f"Loaded {len(session_ids)} session IDs from {session_ids_file}")
+    else:
+        session_ids = JUDGE_SESSION_IDS
+        print(f"Session IDs file not found at {session_ids_file}; falling back to default {len(session_ids)} session(s).")
+
+    target_models = args.target_models if args.target_models else TARGET_MODELS
+
+    for session_id in tqdm(sorted(session_ids), desc="Sessions"):
+        if session_id not in source_by_session:
+            print(f"Warning: Session {session_id} not found in dataset. Skipping.")
+            continue
         item = source_by_session[session_id]
         user_profile = item["user_profile"]
         dialogue_context = build_dialogue_context(item["conversations"], music_db)
-        for target_model in TARGET_MODELS:
+        for target_model in target_models:
             response_path = (
                 BASE_DIR / "exp" / "response" / session_id / f"{target_model}.txt"
             )

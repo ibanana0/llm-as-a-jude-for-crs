@@ -30,10 +30,20 @@ class HF_LLM_Client:
     def __init__(self,
         model_name="Qwen/Qwen3-4B",
         device="cuda",
+        load_in_4bit=False,
     ):
         self.model_name = model_name
         self.device = torch.device(device)
-        self.quantization_config = None
+        self.load_in_4bit = load_in_4bit
+        if load_in_4bit and self.device.type == "cuda":
+            self.quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+        else:
+            self.quantization_config = None
         self.model, self.tokenizer = self._load_model(device=self.device, quantization_config=self.quantization_config)
         if "gemma" in self.model_name.lower():
             self.sampling_parmas = {
@@ -56,15 +66,30 @@ class HF_LLM_Client:
             tuple: `(model, tokenizer)` ready for inference.
         """
         dtype = torch.float16 if device.type == "cuda" else torch.float32
-        model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            torch_dtype=dtype,
-            quantization_config=quantization_config,
-            low_cpu_mem_usage=True,
-            attn_implementation="sdpa"
-        )
+        attn_impl = "eager" if "gemma" in self.model_name.lower() else "sdpa"
+        load_kwargs = {
+            "torch_dtype": dtype,
+            "quantization_config": quantization_config,
+            "low_cpu_mem_usage": True,
+            "attn_implementation": attn_impl,
+        }
+        if quantization_config is not None:
+            load_kwargs["device_map"] = "auto"
+
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                **load_kwargs
+            )
+        except (ValueError, Exception):
+            load_kwargs["attn_implementation"] = "eager"
+            model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                **load_kwargs
+            )
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        model.to(device)
+        if quantization_config is None:
+            model.to(device)
         model.eval()
         return model, tokenizer
 

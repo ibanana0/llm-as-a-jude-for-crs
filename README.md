@@ -38,7 +38,7 @@ python -m pip install -r requirements.txt
 
 The scripts load these TalkPlay datasets from Hugging Face:
 
-- `talkpl-ai/TalkPlayData-Challenge-Blind-A-Master`
+- `talkpl-ai/TalkPlayData-Challenge-Blind-A`
 - `talkpl-ai/TalkPlayData-Challenge-Track-Metadata`
 - `talkpl-ai/TalkPlayData-Challenge-User-Metadata`
 
