@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--judge_model",
-        default="gemini-3.1-flash-lite-preview",
+        default="gemini-3.8-flash",
         help="Gemini judge model identifier.",
     )
     parser.add_argument(

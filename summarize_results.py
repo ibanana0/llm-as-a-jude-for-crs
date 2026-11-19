@@ -16,7 +16,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Summarize and export evaluation results.")
     parser.add_argument(
         "--judge_model",
-        default="gemini-2.5-flash",
+        default="gemini-3.8-flash",
         help="Gemini judge model identifier used during evaluation.",
     )
     parser.add_argument(
