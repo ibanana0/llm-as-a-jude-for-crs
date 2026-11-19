@@ -40,8 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_retries",
         type=int,
-        default=3,
-        help="Maximum API/JSON attempts for each response (default: 3).",
+        default=5,
+        help="Maximum API/JSON attempts for each response (default: 5).",
     )
     parser.add_argument(
         "--session_ids_path",
@@ -97,10 +97,12 @@ def llm_as_a_judge(
                 if type(score[key]) is not int or not 1 <= score[key] <= 5:
                     raise ValueError(f"{key} must be an integer from 1 to 5")
             return score
-        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        except Exception as exc:
             last_error = exc
             if attempt < max_retries:
-                time.sleep(2 ** (attempt - 1))
+                wait_time = 2 ** attempt + 2
+                print(f"\n  [Retry {attempt}/{max_retries}] API or parsing error: {exc}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
 
     raise RuntimeError(
         f"Judge failed after {max_retries} attempts: {last_error}"
@@ -191,6 +193,7 @@ def main() -> None:
             )
             with output_path.open("w", encoding="utf-8") as output_file:
                 json.dump(score, output_file, indent=2, ensure_ascii=False)
+            time.sleep(0.5)
 
 
 if __name__ == "__main__":
