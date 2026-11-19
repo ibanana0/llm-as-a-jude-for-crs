@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Specific target models to evaluate. If omitted, evaluates all TARGET_MODELS.",
     )
+    parser.add_argument(
+        "--api_keys",
+        default=None,
+        help="Comma-separated Gemini API keys for rotation (or set GEMINI_API_KEYS env var).",
+    )
     args = parser.parse_args()
     if args.max_retries < 1:
         parser.error("--max_retries must be at least 1")
@@ -109,17 +114,17 @@ def llm_as_a_judge(
     ) from last_error
 
 
-def build_client(judge_model: str) -> Gemini_LLM_Client:
+def build_client(judge_model: str, api_keys: Optional[str] = None) -> Gemini_LLM_Client:
     load_dotenv(BASE_DIR / "dotenv")
     return Gemini_LLM_Client(
         model_name=judge_model,
-        api_key=os.getenv("GEMINI_API_KEY"),
+        api_keys=api_keys,
     )
 
 
 def main() -> None:
     args = parse_args()
-    client = build_client(args.judge_model)
+    client = build_client(args.judge_model, args.api_keys)
     prompt_path = BASE_DIR / "prompt" / "judge_prompt.txt"
     with prompt_path.open(encoding="utf-8") as prompt_file:
         judge_prompt_template = prompt_file.read()
