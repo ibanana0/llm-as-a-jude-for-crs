@@ -30,11 +30,17 @@ The released pipeline has two stages:
 Python 3.10 or newer and a CUDA GPU are recommended.
 
 ```bash
-cd open_source
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
+
+### Google Colab Notebook
+A ready-to-run Google Colab notebook is provided at [`llm_as_a_judge_for_crs.ipynb`](file:///Users/ibanana/Documents/coding/coding_kuliah/kapita/llm-as-a-judge-for-crs/llm_as_a_judge_for_crs.ipynb) with:
+- Automated GPU environment setup & model inference.
+- Option to restore already-generated responses from Google Drive.
+- Multi-API-key rotation with automatic rate pacing.
+- Automated backup of all experimental artifacts to Google Drive.
 
 The scripts load these TalkPlay datasets from Hugging Face:
 
@@ -44,27 +50,33 @@ The scripts load these TalkPlay datasets from Hugging Face:
 
 Make sure they are accessible before running the pipeline.
 
-## 1. Generate responses with open-source models
+## 1. Multi-turn Filtering & Response Generation
+
+The script automatically filters out non-multi-turn sessions (sessions with fewer than 2 user turns) and saves the selected session IDs to `exp/filtered_session_ids.json` (and `exp/filtered_session_ids.txt`).
 
 Run all four response models:
 
 ```bash
 bash scripts/infer.sh
 ```
+*(Automatically applies `--load_in_4bit` for larger models like `google/gemma-4-E4B-it` to fit in consumer/Colab T4 memory, and skips already-completed sessions).*
 
-Or run one model:
-
-```bash
-python generate_response.py \
-  --llm_model meta-llama/Llama-3.2-1B-Instruct
-```
-
-Use `--device cpu` when CUDA is unavailable:
+Or run an individual model (e.g. 20 multi-turn sessions):
 
 ```bash
 python generate_response.py \
   --llm_model meta-llama/Llama-3.2-1B-Instruct \
-  --device cpu
+  --num_sessions 20 \
+  --device cuda
+```
+
+Use `--load_in_4bit` for large models to reduce VRAM from 16 GB to ~4.5 GB:
+
+```bash
+python generate_response.py \
+  --llm_model google/gemma-4-E4B-it \
+  --device cuda \
+  --load_in_4bit
 ```
 
 Responses are saved to:
@@ -73,54 +85,46 @@ Responses are saved to:
 exp/response/{session_id}/{model_name}.txt
 ```
 
-### Verified inference example
+## 2. Run the conversational LLM-as-a-Judge (Multi-Key Rotation)
 
-We successfully ran `meta-llama/Llama-3.2-1B-Instruct` on the included example session (`525f9f69-31e5-4fee-9813-e903ad24e39e`) using CPU inference. The generated response was saved to:
-
-```text
-exp/response/525f9f69-31e5-4fee-9813-e903ad24e39e/meta-llama-Llama-3.2-1B-Instruct.txt
-```
-
-<details>
-<summary>Example generated response</summary>
-
-> I'm glad I could help you identify the album you were thinking of. If you're looking for more Finnish melodic death metal recommendations, I've got some great ones. Here are a few more:
-> **Blind Guardian** — Their early work, such as "Twilight of the Thunder God" or "Hearts and Bones", has a similar epic and melodic vibe.
-> Let me know if you'd like more recommendations or if you have any specific preferences (e.g., more aggressive, more melodic, etc.)!
-
-</details>
-
-Generation uses sampling, so the exact response may differ across runs.
-
-## 2. Run the conversational LLM-as-a-Judge
-
-Set the Gemini API key:
+Set single or multiple Gemini API keys for automatic round-robin rotation, 4s rate pacing, and 60s cooldown on 429/503:
 
 ```bash
-export GEMINI_API_KEY="..."
+export GEMINI_API_KEYS="your_key_1,your_key_2,your_key_3"
 ```
 
-Run the final full-context judge:
+Run the judge evaluation:
 
 ```bash
 python eval_llm_as_a_judge.py \
-  --judge_model gemini-3.1-flash-lite-preview
+  --judge_model gemini-3.8-flash
 ```
 
-For every response, the judge receives:
+Or evaluate a specific subset of target models:
 
-- the user profile;
-- the complete conversation before the target response;
-- recommended-track metadata contained in that conversation; and
-- the generated assistant response.
+```bash
+python eval_llm_as_a_judge.py \
+  --judge_model gemini-3.8-flash \
+  --target_models meta-llama-Llama-3.2-1B-Instruct meta-llama-Llama-3.2-3B-Instruct google-gemma-4-E2B-it
+```
 
-The original full prompt is stored at `prompt/judge_prompt.txt`. Outputs are saved without score post-processing:
+Outputs are saved without score post-processing:
 
 ```text
 exp/judge_score/{judge_model}/{session_id}/{response_model}.json
 ```
 
-Existing output files are skipped, so an interrupted run can be resumed.
+## 3. Summarize Metrics & Export
+
+Aggregate evaluation scores across all models and export consolidated data:
+
+```bash
+python summarize_results.py --judge_model gemini-3.8-flash
+```
+
+This generates:
+- `exp/evaluation_summary.csv` — Average Personalization & Explanation scores per model.
+- `exp/consolidated_evaluation_results.json` — Consolidated records containing session ID, model, prompt context, generated response, ratings, and judge rationales.
 
 ## Output schema
 
