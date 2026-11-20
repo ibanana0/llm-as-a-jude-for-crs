@@ -11,7 +11,7 @@ LLM_MODELS=(
 for model in "${LLM_MODELS[@]}"; do
     echo "Generating response for $model"
     EXTRA_FLAGS=""
-    if [[ "$model" == *"E4B"* ]] || [[ "$model" == *"e4b"* ]]; then
+    if [[ "$model" == *"gemma"* ]] || [[ "$model" == *"E4B"* ]] || [[ "$model" == *"E2B"* ]]; then
         EXTRA_FLAGS="--load_in_4bit"
     fi
     CUDA_VISIBLE_DEVICES=0 python generate_response.py --llm_model "$model" $EXTRA_FLAGS
