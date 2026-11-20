@@ -1,8 +1,9 @@
-"""Google Gemini client with multi-key rotation and rate-limit pacing."""
+"""Google Gemini client with multi-key rotation, round-robin turn-taking, and rate-limit pacing."""
 
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Optional, List, Union
 from google import genai
@@ -17,7 +18,7 @@ class JudgeScore(pydantic.BaseModel):
 
 
 class GeminiKeyPool:
-    """Manages a pool of Gemini API keys with round-robin rotation, cooldowns, and pacing."""
+    """Manages a pool of Gemini API keys with round-robin turn-taking, cooldowns, and pacing."""
 
     def __init__(self, api_keys: List[str], min_interval_per_key: float = 4.0):
         if not api_keys:
@@ -29,34 +30,48 @@ class GeminiKeyPool:
         self.cooldown_until = [0.0] * len(self.keys)
         self.current_idx = 0
 
+    def get_masked_key(self, idx: int) -> str:
+        key_str = self.keys[idx]
+        if len(key_str) > 10:
+            return f"{key_str[:6]}...{key_str[-4:]}"
+        return "***"
+
     def get_client(self) -> tuple[genai.Client, int]:
         now = time.time()
         num_keys = len(self.keys)
 
-        # Check for any active key not in cooldown
+        # Check for any active key not in cooldown, taking turns in round-robin order
         for attempt in range(num_keys):
             idx = (self.current_idx + attempt) % num_keys
             if now >= self.cooldown_until[idx]:
+                # Advance pointer to take turn for next judge call
                 self.current_idx = (idx + 1) % num_keys
-                # Enforce pacing for this key if needed
+                # Enforce pacing per key if needed (e.g. 15 RPM limit per individual key)
                 elapsed = now - self.last_used[idx]
                 if elapsed < self.min_interval:
-                    time.sleep(self.min_interval - elapsed)
+                    wait_pacing = self.min_interval - elapsed
+                    time.sleep(wait_pacing)
                 self.last_used[idx] = time.time()
                 return self.clients[idx], idx
 
-        # If all keys are in cooldown, sleep until the earliest one recovers
+        # If all keys are currently in cooldown, wait until the earliest one recovers
         min_cooldown = min(self.cooldown_until)
+        earliest_idx = self.cooldown_until.index(min_cooldown)
         wait_seconds = max(1.0, min_cooldown - now + 1.0)
-        print(f"\n  [All {num_keys} API keys in cooldown] Waiting {wait_seconds:.1f}s for key recovery...")
+        print(
+            f"\n  [All {num_keys} API keys in cooldown] Waiting {wait_seconds:.1f}s for Key #{earliest_idx + 1} "
+            f"({self.get_masked_key(earliest_idx)}) to recover..."
+        )
         time.sleep(wait_seconds)
         return self.get_client()
 
     def mark_throttled(self, key_idx: int, cooldown_seconds: float = 60.0):
         self.cooldown_until[key_idx] = time.time() + cooldown_seconds
-        key_str = self.keys[key_idx]
-        masked_key = (key_str[:6] + "..." + key_str[-4:]) if len(key_str) > 10 else "***"
-        print(f"\n  ⚠️ Key #{key_idx + 1} ({masked_key}) throttled. Cooldown set to {cooldown_seconds}s. Rotating to next key...")
+        masked_key = self.get_masked_key(key_idx)
+        print(
+            f"\n  ⚠️ Key #{key_idx + 1} ({masked_key}) hit rate/quota limit. "
+            f"Cooldown set to {cooldown_seconds:.0f}s. Rotating turn immediately to next key..."
+        )
 
 
 class Gemini_LLM_Client:
@@ -67,6 +82,7 @@ class Gemini_LLM_Client:
         model_name: str = "gemini-3.8-flash",
         api_keys: Optional[Union[str, List[str]]] = None,
         api_key: Optional[str] = None,
+        min_interval_per_key: float = 4.0,
     ):
         self.model_name = model_name
 
@@ -84,8 +100,8 @@ class Gemini_LLM_Client:
                 "GEMINI_API_KEY or GEMINI_API_KEYS environment variable is not set."
             )
 
-        self.pool = GeminiKeyPool(key_list)
-        print(f"Initialized Gemini Client with {len(key_list)} API key(s) for model: {self.model_name}")
+        self.pool = GeminiKeyPool(key_list, min_interval_per_key=min_interval_per_key)
+        print(f"Initialized Gemini Client with {len(key_list)} API key(s) in rotation for model: {self.model_name}")
 
     def chat_completion(self, query: str, schema_type: str = "judge", max_key_retries: int = 5) -> str:
         if schema_type == "judge":
@@ -94,9 +110,11 @@ class Gemini_LLM_Client:
             response_schema = None
 
         last_exc = None
-        attempts = max(max_key_retries, len(self.pool.keys) * 2)
+        attempts = max(max_key_retries, len(self.pool.keys) * 3)
         for _ in range(attempts):
             client, key_idx = self.pool.get_client()
+            masked_key = self.pool.get_masked_key(key_idx)
+            print(f"  -> [Key Turn #{key_idx + 1}/{len(self.pool.keys)}: {masked_key}] Generating judge evaluation...")
             try:
                 model_output_text = client.models.generate_content(
                     model=self.model_name,
@@ -108,14 +126,44 @@ class Gemini_LLM_Client:
                 )
                 if not model_output_text.text:
                     raise ValueError("Gemini returned an empty response.")
+                self.pool.last_used[key_idx] = time.time()
                 return model_output_text.text
 
             except Exception as exc:
                 last_exc = exc
                 err_str = str(exc).lower()
-                # Check for rate limit or server capacity issues (429, 503, quota, resource_exhausted, high demand)
-                if any(term in err_str for term in ["429", "503", "resource_exhausted", "high demand", "unavailable", "quota", "rate"]):
-                    self.pool.mark_throttled(key_idx)
+                status_code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+
+                # Check for rate limit or server capacity issues (429, 503, quota, resource_exhausted, high demand, TPM/RPM)
+                is_rate_limit = (
+                    status_code in (429, 503)
+                    or any(
+                        term in err_str
+                        for term in [
+                            "429",
+                            "503",
+                            "resource_exhausted",
+                            "quota",
+                            "rate",
+                            "tpm",
+                            "rpm",
+                            "too many requests",
+                            "high demand",
+                            "unavailable",
+                            "overloaded",
+                            "capacity",
+                            "exhausted",
+                            "limit",
+                        ]
+                    )
+                )
+
+                if is_rate_limit:
+                    cooldown = 60.0
+                    match = re.search(r"retry (?:in|after) (\d+(?:\.\d+)?)s", err_str)
+                    if match:
+                        cooldown = float(match.group(1)) + 2.0
+                    self.pool.mark_throttled(key_idx, cooldown_seconds=cooldown)
                     continue
                 else:
                     raise exc

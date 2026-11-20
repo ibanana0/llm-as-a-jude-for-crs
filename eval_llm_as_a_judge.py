@@ -69,6 +69,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Comma-separated Gemini API keys for rotation (or set GEMINI_API_KEYS env var).",
     )
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=4.0,
+        help="Delay in seconds after generating each judge to eliminate RPM/TPM rate limits (default: 4.0s).",
+    )
+    parser.add_argument(
+        "--min_interval",
+        type=float,
+        default=4.0,
+        help="Minimum interval in seconds between requests using the same API key (default: 4.0s).",
+    )
     args = parser.parse_args()
     if args.max_retries < 1:
         parser.error("--max_retries must be at least 1")
@@ -114,17 +126,22 @@ def llm_as_a_judge(
     ) from last_error
 
 
-def build_client(judge_model: str, api_keys: Optional[str] = None) -> Gemini_LLM_Client:
+def build_client(
+    judge_model: str,
+    api_keys: Optional[str] = None,
+    min_interval: float = 4.0,
+) -> Gemini_LLM_Client:
     load_dotenv(BASE_DIR / "dotenv")
     return Gemini_LLM_Client(
         model_name=judge_model,
         api_keys=api_keys,
+        min_interval_per_key=min_interval,
     )
 
 
 def main() -> None:
     args = parse_args()
-    client = build_client(args.judge_model, args.api_keys)
+    client = build_client(args.judge_model, args.api_keys, args.min_interval)
     prompt_path = BASE_DIR / "prompt" / "judge_prompt.txt"
     with prompt_path.open(encoding="utf-8") as prompt_file:
         judge_prompt_template = prompt_file.read()
@@ -157,6 +174,15 @@ def main() -> None:
         print(f"Session IDs file not found at {session_ids_file}; falling back to default {len(session_ids)} session(s).")
 
     target_models = args.target_models if args.target_models else TARGET_MODELS
+    total_evaluations = len(session_ids) * len(target_models)
+    current_eval_idx = 0
+    generated_count = 0
+
+    print(
+        f"\nStarting LLM judging generation: {len(session_ids)} sessions × {len(target_models)} models "
+        f"= {total_evaluations} total evaluations"
+    )
+    print(f"Configuration: delay_after_judge={args.delay:.1f}s, min_interval_per_key={args.min_interval:.1f}s, keys={len(client.pool.keys)}")
 
     for session_id in tqdm(sorted(session_ids), desc="Sessions"):
         if session_id not in source_by_session:
@@ -166,6 +192,7 @@ def main() -> None:
         user_profile = item["user_profile"]
         dialogue_context = build_dialogue_context(item["conversations"], music_db)
         for target_model in target_models:
+            current_eval_idx += 1
             response_path = (
                 BASE_DIR / "exp" / "response" / session_id / f"{target_model}.txt"
             )
@@ -188,6 +215,9 @@ def main() -> None:
             if output_path.exists():
                 continue
 
+            generated_count += 1
+            print(f"\n[Judge {current_eval_idx}/{total_evaluations}] Session: {session_id} | Model: {target_model}")
+
             score = llm_as_a_judge(
                 client=client,
                 judge_prompt_template=judge_prompt_template,
@@ -198,7 +228,20 @@ def main() -> None:
             )
             with output_path.open("w", encoding="utf-8") as output_file:
                 json.dump(score, output_file, indent=2, ensure_ascii=False)
-            time.sleep(0.5)
+
+            p_score = score.get("personalization_score")
+            e_score = score.get("explanation_score")
+            print(f"  ✓ Saved judge score: Personalization={p_score}, Explanation={e_score}")
+
+            # Taking turns delay: space out generation to completely eliminate RPM & TPM limits
+            if args.delay > 0:
+                next_key_idx = client.pool.current_idx % len(client.pool.keys)
+                next_masked = client.pool.get_masked_key(next_key_idx)
+                print(
+                    f"  ⏳ Pacing delay: sleeping {args.delay:.1f}s after judge generation "
+                    f"(Taking turns -> Next judge will use Key #{next_key_idx + 1}: {next_masked})..."
+                )
+                time.sleep(args.delay)
 
 
 if __name__ == "__main__":

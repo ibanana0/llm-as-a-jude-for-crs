@@ -85,19 +85,20 @@ Responses are saved to:
 exp/response/{session_id}/{model_name}.txt
 ```
 
-## 2. Run the conversational LLM-as-a-Judge (Multi-Key Rotation)
+## 2. Run the conversational LLM-as-a-Judge (Turn-Taking Key Rotation & Rate Limits-Free)
 
-Set single or multiple Gemini API keys for automatic round-robin rotation, 4s rate pacing, and 60s cooldown on 429/503:
+Set single or multiple Gemini API keys. The client automatically **takes turns from one key to the next after every judge generated**, enforces post-judge delay (default 4.0s) to keep RPM and TPM well within limits, and sets a 60s cooldown if any key ever hits a 429/resource exhausted error:
 
 ```bash
 export GEMINI_API_KEYS="your_key_1,your_key_2,your_key_3"
 ```
 
-Run the judge evaluation:
+Run the judge evaluation (configurable delay with `--delay`):
 
 ```bash
 python eval_llm_as_a_judge.py \
-  --judge_model gemini-3.8-flash
+  --judge_model gemini-3.8-flash \
+  --delay 4.0
 ```
 
 Or evaluate a specific subset of target models:
